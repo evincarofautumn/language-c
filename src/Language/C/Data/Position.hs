@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveGeneric #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Language.C.Data.Position
@@ -28,6 +29,7 @@ module Language.C.Data.Position (
   Pos(..),
 ) where
 import Data.Generics
+import GHC.Generics
 
 -- | uniform representation of source file positions
 data Position = Position { posOffset :: {-# UNPACK #-} !Int  -- ^ absolute offset in the preprocessed file
@@ -39,7 +41,7 @@ data Position = Position { posOffset :: {-# UNPACK #-} !Int  -- ^ absolute offse
               | NoPosition
               | BuiltinPosition
               | InternalPosition
-                deriving (Eq, Ord, Typeable, Data)
+                deriving (Eq, Ord, Typeable, Data, GHC.Generics.Generic)
 
 -- | Position and length of a token
 type PosLength = (Position,Int)

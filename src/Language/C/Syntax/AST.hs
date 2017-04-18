@@ -57,12 +57,15 @@ module Language.C.Syntax.AST (
   -- * Annoated type class
   Annotated(..)
 ) where
+
 import Language.C.Syntax.Constants
 import Language.C.Syntax.Ops
 import Language.C.Data.Ident
 import Language.C.Data.Node
 import Language.C.Data.Position
 import Data.Generics
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 
 -- | Complete C tranlsation unit (C99 6.9, K&R A10)
 --
@@ -70,7 +73,7 @@ import Data.Generics
 -- It consists of a list of external (i.e. toplevel) declarations.
 type CTranslUnit = CTranslationUnit NodeInfo
 data CTranslationUnit a
-  = CTranslUnit [CExternalDeclaration a] a
+  = CTranslUnit !(Vector (CExternalDeclaration a)) a
     deriving (Show, Data, Typeable {-! ,CNode ,Functor, Annotated !-})
 
 -- | External C declaration (C99 6.9, K&R A10)
@@ -78,9 +81,9 @@ data CTranslationUnit a
 -- Either a toplevel declaration, function definition or external assembler.
 type CExtDecl = CExternalDeclaration NodeInfo
 data CExternalDeclaration a
-  = CDeclExt (CDeclaration a)
-  | CFDefExt (CFunctionDef a)
-  | CAsmExt  (CStringLiteral a) a
+  = CDeclExt !(CDeclaration a)
+  | CFDefExt !(CFunctionDef a)
+  | CAsmExt  !(CStringLiteral a) a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor, Annotated !-})
 
 -- | C function definition (C99 6.9.1, K&R A10.1)
@@ -99,10 +102,10 @@ data CExternalDeclaration a
 type CFunDef = CFunctionDef NodeInfo
 data CFunctionDef a
   = CFunDef
-    [CDeclarationSpecifier a] -- type specifier and qualifier
-    (CDeclarator a)           -- declarator
-    [CDeclaration a]          -- optional declaration list
-    (CStatement a)            -- compound statement
+    !(Vector (CDeclarationSpecifier a)) -- type specifier and qualifier
+    !(CDeclarator a)          -- declarator
+    !(Vector (CDeclaration a))          -- optional declaration list
+    !(CStatement a)           -- compound statement
     a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
@@ -152,21 +155,21 @@ data CFunctionDef a
 type CDecl = CDeclaration NodeInfo
 data CDeclaration a
   = CDecl
-    [CDeclarationSpecifier a] -- type specifier and qualifier, __attribute__
-    [(Maybe (CDeclarator a),  -- declarator (may be omitted)
+    !(Vector (CDeclarationSpecifier a)) -- type specifier and qualifier, __attribute__
+    !(Vector (Maybe (CDeclarator a),  -- declarator (may be omitted)
       Maybe (CInitializer a), -- optional initialize
-      Maybe (CExpression a))] -- optional size (const expr)
+      Maybe (CExpression a))) -- optional size (const expr)
     a                         -- annotation
-    | CStaticAssert
-      (CExpression a)         -- assert expression
-      (CStringLiteral a)      -- assert text
-      a                       -- annotation
-    deriving (Show, Data,Typeable {-! ,CNode ,Annotated !-})
+  | CStaticAssert
+    !(CExpression a)          -- assert expression
+    !(CStringLiteral a)       -- assert text
+    a                         -- annotation
+  deriving (Show, Data,Typeable {-! ,CNode ,Annotated !-})
 
 -- Derive instance is a little bit ugly
 instance Functor CDeclaration where
   fmap f (CDecl specs declarators annot) =
-    CDecl (map (fmap f) specs) (map fmap3m declarators) (f annot)
+    CDecl (fmap (fmap f) specs) (fmap fmap3m declarators) (f annot)
       where fmap3m (a,b,c) = (fmap (fmap f) a, fmap (fmap f) b, fmap (fmap f) c)
   fmap f (CStaticAssert expression strlit annot) =
     CStaticAssert (fmap f expression) (fmap f strlit) (f annot)
@@ -217,7 +220,7 @@ instance Functor CDeclaration where
 -- > CDeclr "f" [CPtrDeclr [const], CFunDeclr []]
 type CDeclr = CDeclarator NodeInfo
 data CDeclarator a
-  = CDeclr (Maybe Ident) [CDerivedDeclarator a] (Maybe (CStringLiteral a)) [CAttribute a] a
+  = CDeclr !(Maybe Ident) !(Vector (CDerivedDeclarator a)) !(Maybe (CStringLiteral a)) !(Vector (CAttribute a)) a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
@@ -233,11 +236,11 @@ data CDeclarator a
 --      form @Left (parameter-names)@
 type CDerivedDeclr = CDerivedDeclarator NodeInfo
 data CDerivedDeclarator a
-  = CPtrDeclr [CTypeQualifier a] a
+  = CPtrDeclr !(Vector (CTypeQualifier a)) a
   -- ^ Pointer declarator @CPtrDeclr tyquals declr@
-  | CArrDeclr [CTypeQualifier a] (CArraySize a) a
+  | CArrDeclr !(Vector (CTypeQualifier a)) !(CArraySize a) a
   -- ^ Array declarator @CArrDeclr declr tyquals size-expr?@
-  | CFunDeclr (Either [Ident] ([CDeclaration a],Bool)) [CAttribute a] a
+  | CFunDeclr !(Either (Vector (Ident)) (Vector (CDeclaration a),Bool)) !(Vector (CAttribute a)) a
     -- ^ Function declarator @CFunDeclr declr (old-style-params | new-style-params) c-attrs@
     deriving (Show, Data,Typeable {-! ,CNode , Annotated !-})
 
@@ -254,8 +257,8 @@ instance Functor CDerivedDeclarator where
 -- | Size of an array
 type CArrSize = CArraySize NodeInfo
 data CArraySize a
-  = CNoArrSize Bool               -- ^ @CUnknownSize isCompleteType@
-  | CArrSize Bool (CExpression a) -- ^ @CArrSize isStatic expr@
+  = CNoArrSize !Bool                -- ^ @CUnknownSize isCompleteType@
+  | CArrSize !Bool !(CExpression a) -- ^ @CArrSize isStatic expr@
     deriving (Show, Data,Typeable {-! , Functor !-})
 
 
@@ -264,45 +267,45 @@ data CArraySize a
 type CStat = CStatement NodeInfo
 data CStatement a
   -- | An (attributed) label followed by a statement
-  = CLabel  Ident (CStatement a) [CAttribute a] a
+  = CLabel !Ident !(CStatement a) !(Vector (CAttribute a)) a
   -- | A statement of the form @case expr : stmt@
-  | CCase (CExpression a) (CStatement a) a
+  | CCase !(CExpression a) !(CStatement a) a
   -- | A case range of the form @case lower ... upper : stmt@
-  | CCases (CExpression a) (CExpression a) (CStatement a) a
+  | CCases !(CExpression a) !(CExpression a) !(CStatement a) a
   -- | The default case @default : stmt@
-  | CDefault (CStatement a) a
+  | CDefault !(CStatement a) a
   -- | A simple statement, that is in C: evaluating an expression with
   --   side-effects and discarding the result.
-  | CExpr (Maybe (CExpression a)) a
+  | CExpr !(Maybe (CExpression a)) a
   -- | compound statement @CCompound localLabels blockItems at@
-  | CCompound [Ident] [CCompoundBlockItem a] a
+  | CCompound !(Vector (Ident)) !(Vector (CCompoundBlockItem a)) a
   -- | conditional statement @CIf ifExpr thenStmt maybeElseStmt at@
-  | CIf (CExpression a) (CStatement a) (Maybe (CStatement a)) a
+  | CIf !(CExpression a) !(CStatement a) !(Maybe (CStatement a)) a
   -- | switch statement @CSwitch selectorExpr switchStmt@, where
   -- @switchStmt@ usually includes /case/, /break/ and /default/
   -- statements
-  | CSwitch (CExpression a) (CStatement a) a
+  | CSwitch !(CExpression a) !(CStatement a) a
   -- | while or do-while statement @CWhile guard stmt isDoWhile at@
-  | CWhile (CExpression a) (CStatement a) Bool a
+  | CWhile !(CExpression a) !(CStatement a) Bool a
   -- | for statement @CFor init expr-2 expr-3 stmt@, where @init@ is
   -- either a declaration or initializing expression
-  | CFor (Either (Maybe (CExpression a)) (CDeclaration a))
-    (Maybe (CExpression a))
-    (Maybe (CExpression a))
-    (CStatement a)
+  | CFor !(Either (Maybe (CExpression a)) (CDeclaration a))
+    !(Maybe (CExpression a))
+    !(Maybe (CExpression a))
+    !(CStatement a)
     a
   -- | goto statement @CGoto label@
-  | CGoto Ident a
+  | CGoto !Ident a
   -- | computed goto @CGotoPtr labelExpr@
-  | CGotoPtr (CExpression a) a
+  | CGotoPtr !(CExpression a) a
   -- | continue statement
   | CCont a
   -- | break statement
   | CBreak a
   -- | return statement @CReturn returnExpr@
-  | CReturn (Maybe (CExpression a)) a
+  | CReturn !(Maybe (CExpression a)) a
   -- | assembly statement
-  | CAsm (CAssemblyStatement a) a
+  | CAsm !(CAssemblyStatement a) a
     deriving (Show, Data,Typeable {-! , CNode , Annotated !-})
 
 -- Derived instance relies on fmap2 :(
@@ -346,11 +349,11 @@ instance Functor CStatement where
 type CAsmStmt = CAssemblyStatement NodeInfo
 data CAssemblyStatement a
   = CAsmStmt
-    (Maybe (CTypeQualifier a)) -- maybe volatile
-    (CStringLiteral a)         -- assembler expression (String)
-    [CAssemblyOperand a]       -- output operands
-    [CAssemblyOperand a]       -- input operands
-    [CStringLiteral a]         -- Clobbers
+    !(Maybe (CTypeQualifier a)) -- maybe volatile
+    !(CStringLiteral a)         -- assembler expression (String)
+    !(Vector (CAssemblyOperand a))        -- output operands
+    !(Vector (CAssemblyOperand a))        -- input operands
+    !(Vector (CStringLiteral a))          -- Clobbers
     a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
@@ -361,9 +364,9 @@ data CAssemblyStatement a
 type CAsmOperand = CAssemblyOperand NodeInfo
 data CAssemblyOperand a
   = CAsmOperand
-    (Maybe Ident)       -- argument name
-    (CStringLiteral a)  -- constraint expr
-    (CExpression a)     -- argument
+    !(Maybe Ident)       -- argument name
+    !(CStringLiteral a)  -- constraint expr
+    !(CExpression a)     -- argument
     a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
@@ -373,9 +376,9 @@ data CAssemblyOperand a
 --   or nested function definitions.
 type CBlockItem = CCompoundBlockItem NodeInfo
 data CCompoundBlockItem a
-  = CBlockStmt    (CStatement a)    -- ^ A statement
-  | CBlockDecl    (CDeclaration a)  -- ^ A local declaration
-  | CNestedFunDef (CFunctionDef a)  -- ^ A nested function (GNU C)
+  = CBlockStmt    !(CStatement a)    -- ^ A statement
+  | CBlockDecl    !(CDeclaration a)  -- ^ A local declaration
+  | CNestedFunDef !(CFunctionDef a)  -- ^ A nested function (GNU C)
     deriving (Show, Data,Typeable {-! , CNode , Functor, Annotated !-})
 
 -- | C declaration specifiers and qualifiers
@@ -384,11 +387,11 @@ data CCompoundBlockItem a
 -- type specifiers (6.7.2) and type qualifiers (6.7.3).
 type CDeclSpec = CDeclarationSpecifier NodeInfo
 data CDeclarationSpecifier a
-  = CStorageSpec (CStorageSpecifier a) -- ^ storage-class specifier or typedef
-  | CTypeSpec    (CTypeSpecifier a)    -- ^ type name
-  | CTypeQual    (CTypeQualifier a)    -- ^ type qualifier
-  | CFunSpec     (CFunctionSpecifier a) -- ^ function specifier
-  | CAlignSpec   (CAlignmentSpecifier a) -- ^ alignment specifier
+  = CStorageSpec !(CStorageSpecifier a) -- ^ storage-class specifier or typedef
+  | CTypeSpec    !(CTypeSpecifier a)    -- ^ type name
+  | CTypeQual    !(CTypeQualifier a)    -- ^ type qualifier
+  | CFunSpec     !(CFunctionSpecifier a) -- ^ function specifier
+  | CAlignSpec   !(CAlignmentSpecifier a) -- ^ alignment specifier
     deriving (Show, Data,Typeable {-! ,CNode ,Functor, Annotated !-})
 
 
@@ -396,11 +399,19 @@ data CDeclarationSpecifier a
 --
 -- @__attribute__@ of a declaration qualify declarations or declarators (but not types),
 -- and are therefore separated as well.
-partitionDeclSpecs :: [CDeclarationSpecifier a]
-                   -> ( [CStorageSpecifier a], [CAttribute a]
-                      , [CTypeQualifier a], [CTypeSpecifier a]
-                      , [CFunctionSpecifier a], [CAlignmentSpecifier a])
-partitionDeclSpecs = foldr deals ([],[],[],[],[],[]) where
+partitionDeclSpecs :: Vector (CDeclarationSpecifier a)
+                   -> ( Vector (CStorageSpecifier a), Vector (CAttribute a)
+                      , Vector (CTypeQualifier a), Vector (CTypeSpecifier a)
+                      , Vector (CFunctionSpecifier a), Vector (CAlignmentSpecifier a))
+partitionDeclSpecs = toVectors . foldr deals ([],[],[],[],[],[]) where
+    toVectors (sts,ats,tqs,tss,fss,ass) =
+      ( Vector.fromList sts
+      , Vector.fromList ats
+      , Vector.fromList tqs
+      , Vector.fromList tss
+      , Vector.fromList fss
+      , Vector.fromList ass
+      )
     deals (CStorageSpec sp) (sts,ats,tqs,tss,fss,ass)  = (sp:sts,ats,tqs,tss,fss,ass)
     deals (CTypeQual (CAttrQual attr)) (sts,ats,tqs,tss,fss,ass)  = (sts,attr:ats,tqs,tss,fss,ass)
     deals (CTypeQual tq) (sts,ats,tqs,tss,fss,ass)     = (sts,ats,tq:tqs,tss,fss,ass)
@@ -440,12 +451,12 @@ data CTypeSpecifier a
   | CBoolType    a
   | CComplexType a
   | CInt128Type  a
-  | CSUType      (CStructureUnion a) a      -- ^ Struct or Union specifier
-  | CEnumType    (CEnumeration a)    a      -- ^ Enumeration specifier
-  | CTypeDef     Ident        a      -- ^ Typedef name
-  | CTypeOfExpr  (CExpression a)  a  -- ^ @typeof(expr)@
-  | CTypeOfType  (CDeclaration a) a  -- ^ @typeof(type)@
-  | CAtomicType  (CDeclaration a) a  -- ^ @_Atomic(type)@
+  | CSUType      !(CStructureUnion a) a -- ^ Struct or Union specifier
+  | CEnumType    !(CEnumeration a)    a -- ^ Enumeration specifier
+  | CTypeDef     !Ident        a        -- ^ Typedef name
+  | CTypeOfExpr  !(CExpression a)  a    -- ^ @typeof(expr)@
+  | CTypeOfType  !(CDeclaration a) a    -- ^ @typeof(type)@
+  | CAtomicType  !(CDeclaration a) a    -- ^ @_Atomic(type)@
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
@@ -466,7 +477,7 @@ data CTypeQualifier a
   | CVolatQual a
   | CRestrQual a
   | CAtomicQual a
-  | CAttrQual  (CAttribute a)
+  | CAttrQual !(CAttribute a)
   | CNullableQual a
   | CNonnullQual a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
@@ -484,8 +495,8 @@ data CFunctionSpecifier a
 --
 type CAlignSpec = CAlignmentSpecifier NodeInfo
 data CAlignmentSpecifier a
-  = CAlignAsType (CDeclaration a) a  -- ^ @_Alignas(type)@
-  | CAlignAsExpr (CExpression a) a   -- ^ @_Alignas(expr)@
+  = CAlignAsType !(CDeclaration a) a  -- ^ @_Alignas(type)@
+  | CAlignAsExpr !(CExpression a) a   -- ^ @_Alignas(expr)@
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
@@ -502,10 +513,10 @@ data CAlignmentSpecifier a
 type CStructUnion = CStructureUnion NodeInfo
 data CStructureUnion a
   = CStruct
-    CStructTag
-    (Maybe Ident)
-    (Maybe [CDeclaration a])  -- member declarations
-    [CAttribute a]            -- __attribute__s
+    !CStructTag
+    !(Maybe Ident)
+    !(Maybe (Vector (CDeclaration a))) -- member declarations
+    !(Vector (CAttribute a))            -- __attribute__s
     a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
@@ -532,9 +543,9 @@ type CEnum = CEnumeration NodeInfo
 data CEnumeration a
   = CEnum
     (Maybe Ident)
-    (Maybe [(Ident,                   -- variant name
-             Maybe (CExpression a))]) -- explicit variant value
-    [CAttribute a]                    -- __attribute__s
+    (Maybe (Vector(Ident,                   -- variant name
+             Maybe (CExpression a)))) -- explicit variant value
+    !(Vector (CAttribute a))                    -- __attribute__s
     a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
@@ -548,9 +559,9 @@ data CEnumeration a
 type CInit = CInitializer NodeInfo
 data CInitializer a
   -- | assignment expression
-  = CInitExpr (CExpression a) a
+  = CInitExpr !(CExpression a) a
   -- | initialization list (see 'CInitList')
-  | CInitList (CInitializerList a) a
+  | CInitList !(CInitializerList a) a
     deriving (Show, Data,Typeable {-! ,CNode , Annotated !-})
 
 -- deriving Functor does not work (type synonym)
@@ -558,7 +569,7 @@ instance Functor CInitializer where
         fmap _f (CInitExpr a1 a2) = CInitExpr (fmap _f a1) (_f a2)
         fmap _f (CInitList a1 a2) = CInitList (fmapInitList _f a1) (_f a2)
 fmapInitList :: (a->b) -> (CInitializerList a) -> (CInitializerList b)
-fmapInitList _f = map (\(desigs, initializer) -> (fmap (fmap _f) desigs, fmap _f initializer))
+fmapInitList _f = fmap (\(desigs, initializer) -> (fmap (fmap _f) desigs, fmap _f initializer))
 
 -- | Initializer List
 --
@@ -587,7 +598,7 @@ fmapInitList _f = map (\(desigs, initializer) -> (fmap (fmap _f) desigs, fmap _f
 -- >                          ]
 -- > in  CInitList [(CMemberDesig "s", init_s)]
 type CInitList = CInitializerList NodeInfo
-type CInitializerList a = [([CPartDesignator a], CInitializer a)]
+type CInitializerList a = Vector (Vector (CPartDesignator a), CInitializer a)
 
 -- | Designators
 --
@@ -596,11 +607,11 @@ type CInitializerList a = [([CPartDesignator a], CInitializer a)]
 type CDesignator = CPartDesignator NodeInfo
 data CPartDesignator a
   -- | array position designator
-  = CArrDesig     (CExpression a) a
+  = CArrDesig     !(CExpression a) a
   -- | member designator
-  | CMemberDesig  Ident a
+  | CMemberDesig  !Ident a
   -- | array range designator @CRangeDesig from to _@ (GNU C)
-  | CRangeDesig (CExpression a) (CExpression a) a
+  | CRangeDesig !(CExpression a) !(CExpression a) a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
@@ -609,7 +620,7 @@ data CPartDesignator a
 -- Those are of the form @CAttr attribute-name attribute-parameters@,
 -- and serve as generic properties of some syntax tree elements.
 type CAttr = CAttribute NodeInfo
-data CAttribute a = CAttr Ident [CExpression a] a
+data CAttribute a = CAttr !Ident !(Vector (CExpression a)) a
                     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
@@ -622,58 +633,58 @@ data CAttribute a = CAttr Ident [CExpression a] a
 --
 type CExpr = CExpression NodeInfo
 data CExpression a
-  = CComma       [CExpression a]         -- comma expression list, n >= 2
+  = CComma       !(Vector (CExpression a))         -- comma expression list, n >= 2
                  a
-  | CAssign      CAssignOp               -- assignment operator
-                 (CExpression a)         -- l-value
-                 (CExpression a)         -- r-value
+  | CAssign      !CAssignOp              -- assignment operator
+                 !(CExpression a)        -- l-value
+                 !(CExpression a)        -- r-value
                  a
-  | CCond        (CExpression a)         -- conditional
-                 (Maybe (CExpression a)) -- true-expression (GNU allows omitting)
-                 (CExpression a)         -- false-expression
+  | CCond        !(CExpression a)         -- conditional
+                 !(Maybe (CExpression a)) -- true-expression (GNU allows omitting)
+                 !(CExpression a)         -- false-expression
                  a
-  | CBinary      CBinaryOp               -- binary operator
-                 (CExpression a)         -- lhs
-                 (CExpression a)         -- rhs
+  | CBinary      !CBinaryOp               -- binary operator
+                 !(CExpression a)         -- lhs
+                 !(CExpression a)         -- rhs
                  a
-  | CCast        (CDeclaration a)        -- type name
-                 (CExpression a)
+  | CCast        !(CDeclaration a)        -- type name
+                 !(CExpression a)
                  a
-  | CUnary       CUnaryOp                -- unary operator
-                 (CExpression a)
+  | CUnary       !CUnaryOp                -- unary operator
+                 !(CExpression a)
                  a
-  | CSizeofExpr  (CExpression a)
+  | CSizeofExpr  !(CExpression a)
                  a
-  | CSizeofType  (CDeclaration a)        -- type name
+  | CSizeofType  !(CDeclaration a)        -- type name
                  a
-  | CAlignofExpr (CExpression a)
+  | CAlignofExpr !(CExpression a)
                  a
-  | CAlignofType (CDeclaration a)        -- type name
+  | CAlignofType !(CDeclaration a)        -- type name
                  a
-  | CComplexReal (CExpression a)         -- real part of complex number
+  | CComplexReal !(CExpression a)         -- real part of complex number
                  a
-  | CComplexImag (CExpression a)         -- imaginary part of complex number
+  | CComplexImag !(CExpression a)         -- imaginary part of complex number
                  a
-  | CIndex       (CExpression a)         -- array
-                 (CExpression a)         -- index
+  | CIndex       !(CExpression a)         -- array
+                 !(CExpression a)         -- index
                  a
-  | CCall        (CExpression a)         -- function
-                 [CExpression a]         -- arguments
+  | CCall        !(CExpression a)         -- function
+                 !(Vector (CExpression a))         -- arguments
                  a
-  | CMember      (CExpression a)         -- structure
-                 Ident                   -- member name
-                 Bool                    -- deref structure? (True for `->')
+  | CMember      !(CExpression a)         -- structure
+                 !Ident                   -- member name
+                 !Bool                    -- deref structure? (True for `->')
                  a
-  | CVar         Ident                   -- identifier (incl. enumeration const)
+  | CVar         !Ident                   -- identifier (incl. enumeration const)
                  a
-  | CConst       (CConstant a)           -- ^ integer, character, floating point and string constants
-  | CCompoundLit (CDeclaration a)
-                 (CInitializerList a)    -- type name & initialiser list
+  | CConst       !(CConstant a)           -- ^ integer, character, floating point and string constants
+  | CCompoundLit !(CDeclaration a)
+                 !(CInitializerList a)    -- type name & initialiser list
                  a                       -- ^ C99 compound literal
-  | CGenericSelection (CExpression a) [(Maybe (CDeclaration a), CExpression a)] a -- ^ C11 generic selection
-  | CStatExpr    (CStatement a) a        -- ^ GNU C compound statement as expr
-  | CLabAddrExpr Ident a                 -- ^ GNU C address of label
-  | CBuiltinExpr (CBuiltinThing a)       -- ^ builtin expressions, see 'CBuiltin'
+  | CGenericSelection !(CExpression a) !(Vector (Maybe (CDeclaration a), CExpression a)) a -- ^ C11 generic selection
+  | CStatExpr    !(CStatement a) a        -- ^ GNU C compound statement as expr
+  | CLabAddrExpr !Ident a                 -- ^ GNU C address of label
+  | CBuiltinExpr !(CBuiltinThing a)       -- ^ builtin expressions, see 'CBuiltin'
     deriving (Data,Typeable,Show {-! ,CNode , Annotated !-})
 
 -- deriving Functor does not work (type synonyms)
@@ -706,32 +717,32 @@ instance Functor CExpression where
         fmap _f (CLabAddrExpr a1 a2) = CLabAddrExpr a1 (_f a2)
         fmap _f (CBuiltinExpr a1) = CBuiltinExpr (fmap _f a1)
         fmap _f (CGenericSelection expr list annot) =
-          CGenericSelection (fmap _f expr) (map fmap_helper list) (_f annot)
+          CGenericSelection (fmap _f expr) (fmap fmap_helper list) (_f annot)
           where
             fmap_helper (ma1, a2) = (fmap (fmap _f) ma1, fmap _f a2)
 
 -- | GNU Builtins, which cannot be typed in C99
 type CBuiltin = CBuiltinThing NodeInfo
 data CBuiltinThing a
-  = CBuiltinVaArg (CExpression a) (CDeclaration a) a            -- ^ @(expr, type)@
-  | CBuiltinOffsetOf (CDeclaration a) [CPartDesignator a] a -- ^ @(type, designator-list)@
-  | CBuiltinTypesCompatible (CDeclaration a) (CDeclaration a) a  -- ^ @(type,type)@
+  = CBuiltinVaArg !(CExpression a) !(CDeclaration a) a            -- ^ @(expr, type)@
+  | CBuiltinOffsetOf !(CDeclaration a) !(Vector (CPartDesignator a)) a      -- ^ @(type, designator-list)@
+  | CBuiltinTypesCompatible !(CDeclaration a) !(CDeclaration a) a -- ^ @(type,type)@
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
 -- | C constant (K&R A2.5 & A7.2)
 type CConst = CConstant NodeInfo
 data CConstant a
-  = CIntConst   CInteger a
-  | CCharConst  CChar a
-  | CFloatConst CFloat a
-  | CStrConst   CString a
+  = CIntConst   !CInteger a
+  | CCharConst  !CChar a
+  | CFloatConst !CFloat a
+  | CStrConst   !CString a
     deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 
 -- | Attributed string literals
 type CStrLit = CStringLiteral NodeInfo
-data CStringLiteral a = CStrLit CString a
+data CStringLiteral a = CStrLit !CString a
             deriving (Show, Data,Typeable {-! ,CNode ,Functor ,Annotated !-})
 
 

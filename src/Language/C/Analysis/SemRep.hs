@@ -57,6 +57,9 @@ import Language.C.Data
 import Language.C.Syntax
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import Data.Monoid ((<>), mempty)
 import Data.Maybe
 import Data.Generics
 
@@ -250,7 +253,7 @@ data MemberDecl = MemberDecl VarDecl (Maybe Expr) NodeInfo
 
 instance Declaration MemberDecl where
   getVarDecl (MemberDecl vd _ _) = vd
-  getVarDecl (AnonBitField ty _ _) = VarDecl NoName (DeclAttrs noFunctionAttrs NoStorage []) ty
+  getVarDecl (AnonBitField ty _ _) = VarDecl NoName (DeclAttrs noFunctionAttrs NoStorage mempty) ty
 
 -- | @typedef@ definitions.
 --
@@ -357,7 +360,7 @@ data Type =
 -- | Function types are of the form @FunType return-type params isVariadic@.
 --
 -- If the parameter types aren't yet known, the function has type @FunTypeIncomplete type attrs@.
-data FunType = FunType Type [ParamDecl] Bool
+data FunType = FunType Type (Vector ParamDecl) Bool
             |  FunTypeIncomplete Type
                deriving (Typeable, Data)
 
@@ -449,7 +452,7 @@ data EnumTypeRef = EnumTypeRef SUERef NodeInfo
 instance HasSUERef  EnumTypeRef where sueRef  (EnumTypeRef ref _) = ref
 
 -- | Composite type (struct or union).
-data CompType =  CompType SUERef CompTyKind [MemberDecl] Attributes NodeInfo
+data CompType =  CompType SUERef CompTyKind (Vector MemberDecl) Attributes NodeInfo
                  deriving (Typeable, Data {-! ,CNode !-} )
 instance HasSUERef  CompType where sueRef  (CompType ref _ _ _ _) = ref
 instance HasCompTyKind CompType where compTag (CompType _ tag _ _ _) = tag
@@ -468,7 +471,7 @@ instance Show CompTyKind where
     show UnionTag  = "union"
 
 -- | Representation of C enumeration types
-data EnumType = EnumType SUERef [Enumerator] Attributes NodeInfo
+data EnumType = EnumType SUERef (Vector Enumerator) Attributes NodeInfo
                  -- ^ @EnumType name enumeration-constants attrs node@
                  deriving (Typeable, Data {-! ,CNode !-} )
 
@@ -485,7 +488,7 @@ instance Declaration Enumerator where
   getVarDecl (Enumerator ide _ enumty _) =
     VarDecl
       (VarName ide Nothing)
-      (DeclAttrs noFunctionAttrs NoStorage [])
+      (DeclAttrs noFunctionAttrs NoStorage mempty)
       (DirectType (typeOfEnumDef enumty) noTypeQuals noAttributes)
 
 -- | Type qualifiers: constant, volatile and restrict
@@ -565,19 +568,19 @@ type AsmName = CStrLit
 -- * or with /const/ to indicate that it is a pure function
 --
 -- /TODO/: ultimatively, we want to parse attributes and represent them in a typed way
-data Attr = Attr Ident [Expr] NodeInfo
+data Attr = Attr Ident (Vector Expr) NodeInfo
             deriving (Typeable, Data {-! ,CNode !-})
 
-type Attributes = [Attr]
+type Attributes = Vector Attr
 
 -- |Empty attribute list
 noAttributes :: Attributes
-noAttributes = []
+noAttributes = mempty
 
 -- |Merge attribute lists
 -- /TODO/: currently does not remove duplicates
 mergeAttributes :: Attributes -> Attributes -> Attributes
-mergeAttributes = (++)
+mergeAttributes = (<>)
 
 -- * statements and expressions (Type aliases)
 

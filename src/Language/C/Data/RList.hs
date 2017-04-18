@@ -13,17 +13,21 @@
 -----------------------------------------------------------------------------
 module Language.C.Data.RList (
     RList,Reversed(..),
-    empty,singleton,snoc,rappend,appendr,rappendr,rmap,reverse,
+    empty,singleton,snoc,rappend,appendr,rappendr,rmap,reverse,reverseV,
     viewr,
 )
 where
 import Prelude hiding (reverse)
 import qualified Data.List as List
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import Control.Applicative (Alternative)
+import qualified Control.Applicative as Applicative
 
 newtype Reversed a = Reversed a
 type RList a = Reversed [a]
-empty :: Reversed [a]
-empty = Reversed []
+empty :: Alternative f => Reversed (f a)
+empty = Reversed Applicative.empty
 
 singleton :: a -> Reversed [a]
 singleton x = Reversed [x]
@@ -46,6 +50,9 @@ rmap f (Reversed xs) = Reversed (map f xs)
 
 reverse :: Reversed [a] -> [a]
 reverse (Reversed xs) = List.reverse xs
+
+reverseV :: Reversed [a] -> Vector a
+reverseV = Vector.fromList . reverse
 
 viewr :: Reversed [a] -> (Reversed [a] , a)
 viewr (Reversed []) = error "viewr: empty RList"

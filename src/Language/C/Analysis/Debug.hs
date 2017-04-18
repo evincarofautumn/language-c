@@ -28,6 +28,8 @@ import Language.C.Pretty
 
 import Text.PrettyPrint.HughesPJ
 import Data.Map (Map) ; import qualified Data.Map as Map
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 
 prettyAssocs :: (Pretty k, Pretty v) => String -> [(k,v)] -> Doc
 prettyAssocs label = prettyAssocsWith label pretty pretty
@@ -137,7 +139,7 @@ instance Pretty TypeQuals where
 instance Pretty CompType where
     pretty (CompType sue_ref tag members attrs _node) =
         (text.show) tag <+> pretty sue_ref <+>
-        braces (terminateSemi members) <+>
+        braces (terminateSemi (Vector.toList members)) <+>
         pretty attrs
 
 instance Pretty MemberDecl where
@@ -149,7 +151,7 @@ instance Pretty MemberDecl where
 
 instance Pretty EnumType where
     pretty (EnumType sue_ref enumerators attrs _) =
-      text "enum" <+> pretty sue_ref <+> braces (terminateSemi_ $ map prettyEnr enumerators) <+> pretty attrs
+      text "enum" <+> pretty sue_ref <+> braces (terminateSemi_ $ map prettyEnr $ Vector.toList enumerators) <+> pretty attrs
       where
       prettyEnr (Enumerator ident expr _enumty _) = pretty ident <+> text " = " <+> pretty expr
 
@@ -178,7 +180,7 @@ instance Pretty VarName where
     pretty (VarName ident asmname_opt) = pretty ident <+> (maybe empty pAsmName asmname_opt)
         where pAsmName asmname = text "" <+> parens (text "asmname" <+> pretty asmname)
 instance Pretty Attributes where
-    pretty = joinComma
+    pretty = joinComma . Vector.toList
 instance Pretty Attr where
     pretty (Attr ident es _) = pretty ident <+> (if null es then empty else text "(...)")
 

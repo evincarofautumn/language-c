@@ -42,6 +42,8 @@ import Language.C.Analysis.SemRep
 import Language.C.Data.Node (CNode(..))
 import Language.C.Syntax.AST (CExpression (..), CConstant (..))
 import Language.C.Syntax.Constants
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 
 -- | Constructor for a simple integral type.
 integral :: IntType -> Type
@@ -53,11 +55,11 @@ floating ty = DirectType (TyFloating ty) noTypeQuals noAttributes
 
 -- | A simple pointer with no qualifiers
 simplePtr :: Type -> Type
-simplePtr t = PtrType t noTypeQuals []
+simplePtr t = PtrType t noTypeQuals mempty
 
 -- | A pointer with the @const@ qualifier.
 constPtr :: Type -> Type
-constPtr t = PtrType t (noTypeQuals { constant = True }) []
+constPtr t = PtrType t (noTypeQuals { constant = True }) mempty
 
 -- | The underlying type for @uint16_t@. For now, this is just @unsigned short@.
 uint16_tType :: Type
@@ -111,7 +113,7 @@ stringType  = ArrayType
                           noAttributes)
               (UnknownArraySize False)
               noTypeQuals
-              []
+              mempty
 
 -- | The builtin type of variable-length argument lists.
 valistType :: Type
@@ -288,10 +290,10 @@ sameFunType :: FunType -> FunType -> Bool
 sameFunType (FunType rt1 params1 isVar1) (FunType rt2 params2 isVar2) =
   sameType rt1 rt2 && sameParamDecls params1 params2 && isVar1 == isVar2
   where
-    sameParamDecls :: [ParamDecl] -> [ParamDecl] -> Bool
+    sameParamDecls :: Vector ParamDecl -> Vector ParamDecl -> Bool
     sameParamDecls param_list1 param_list2 =
-      length param_list1 == length param_list2
-      && and (zipWith sameParamDecl param_list1 param_list2)
+      Vector.length param_list1 == Vector.length param_list2
+      && Vector.and (Vector.zipWith sameParamDecl param_list1 param_list2)
     -- ignores param identifiers, just compares types
     sameParamDecl :: ParamDecl -> ParamDecl -> Bool
     sameParamDecl p1 p2 = sameType (declType p1) (declType p2)
