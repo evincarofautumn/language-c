@@ -82,7 +82,7 @@ compSize md ctr =
        Just (Left _)   -> astError (nodeInfo ctr)
                           "composite declared but not defined"
        Just (Right (CompDef (CompType _ tag ms _ ni))) ->
-         do let ts = map declType ms
+         do let ts = fmap declType ms
             sizes <- mapM (sizeofType md ni) ts
             -- XXX: handle padding
             case tag of

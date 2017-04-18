@@ -1,4 +1,4 @@
-{-# LANGUAGE PatternGuards, FlexibleContexts #-}
+{-# LANGUAGE PatternGuards, ViewPatterns, FlexibleContexts #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Language.C.Analysis.DeclAnalysis
@@ -38,11 +38,13 @@ import Language.C.Analysis.TravMonad
 import Data.Foldable as F (foldrM)
 import Control.Monad (liftM,when,ap,unless,zipWithM)
 import Data.List (intercalate, mapAccumL)
+import Data.Monoid ((<>))
 import qualified Data.Map as Map
-import Text.PrettyPrint.HughesPJ
+import Text.PrettyPrint.HughesPJ hiding ((<>), first)
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import Data.Foldable (Foldable(..))
+import Control.Arrow (second)
 
 -- * handling declarations
 
@@ -81,7 +83,7 @@ computeParamStorage _ RegSpec       = Right (Auto True)
 computeParamStorage node spec       = Left . badSpecifierError node $ "Bad storage specified for parameter: " ++ show spec
 
 -- | analyse and translate a member declaration
-tMemberDecls :: (MonadTrav m) => CDecl -> m [MemberDecl]
+tMemberDecls :: (MonadTrav m) => CDecl -> m (Vector MemberDecl)
 -- Anonymous struct or union members
 -- TODO storage specs, align specs and attributes are ignored
 tMemberDecls (CStaticAssert _ _ node) =
@@ -91,16 +93,16 @@ tMemberDecls (CDecl declspecs v node) | Vector.null v =
            partitionDeclSpecs declspecs
      unless (null funspecs) $ astError node "member declaration with function specifier"
      canonTySpecs <- canonicalTypeSpec (Vector.toList typespecs)
-     ty <- tType True node (Vector.toList typequals) canonTySpecs [] []
+     ty <- tType True node typequals canonTySpecs mempty mempty
      case ty of
        DirectType (TyComp _) _ _ ->
-         return $ [MemberDecl
+         return $ Vector.fromList [MemberDecl
                    -- XXX: are these DeclAttrs correct?
                    (VarDecl NoName (DeclAttrs noFunctionAttrs NoStorage mempty) ty)
                    Nothing node]
        _ -> astError node "anonymous member has a non-composite type"
 -- Named members
-tMemberDecls (CDecl declspecs declrs node) = zipWithM tMemberDecl (True:repeat False) (Vector.toList declrs)
+tMemberDecls (CDecl declspecs declrs node) = liftM Vector.fromList $ zipWithM tMemberDecl (True:repeat False) (Vector.toList declrs)
     where
     tMemberDecl handle_sue_def (Just member_declr,Nothing,bit_field_size_opt) =
         -- TODO: use analyseVarDecl here, not analyseVarDecl'
@@ -116,7 +118,7 @@ tMemberDecls (CDecl declspecs declrs node) = zipWithM tMemberDecl (True:repeat F
            _storage_spec  <- canonicalStorageSpec (Vector.toList storage_specs)
            -- TODO: storage_spec not used
            canonTySpecs  <- canonicalTypeSpec (Vector.toList typespecs)
-           typ           <- tType handle_sue_def node (Vector.toList typequals) canonTySpecs [] []
+           typ           <- tType handle_sue_def node typequals canonTySpecs mempty mempty
            --
            return $ AnonBitField typ bit_field_size node
     tMemberDecl _ _ = astError node "Bad member declaration"
@@ -158,20 +160,20 @@ analyseVarDecl handle_sue_def storage_specs decl_attrs typequals canonTySpecs fu
     = do -- analyse the storage specifiers
          storage_spec  <- canonicalStorageSpec storage_specs
          -- translate the type into semantic representation
-         typ          <- tType handle_sue_def node typequals canonTySpecs (Vector.toList derived_declrs) oldstyle_params
+         typ          <- tType handle_sue_def node typequals canonTySpecs derived_declrs oldstyle_params
          -- translate attributes
-         attrs'       <- mapM tAttr (Vector.toList (decl_attrs <> declr_attrs))
+         attrs'       <- Vector.mapM tAttr (decl_attrs <> declr_attrs)
          -- make name
          name         <- mkVarName node name_opt asmname_opt
-         return $ VarDeclInfo name function_spec storage_spec (Vector.toList attrs') typ node
+         return $ VarDeclInfo name function_spec storage_spec attrs' typ node
     where
         updateFunSpec (CInlineQual _) f = f { isInline = True }
         updateFunSpec (CNoreturnQual _) f = f { isNoreturn = True }
         function_spec = foldr updateFunSpec noFunctionAttrs fun_specs
 
 -- return @True@ if the declarations is a type def
-isTypeDef :: [CDeclSpec] -> Bool
-isTypeDef declspecs = not $ null [ n | (CStorageSpec (CTypedef n)) <- declspecs ]
+isTypeDef :: Vector CDeclSpec -> Bool
+isTypeDef declspecs = not $ null [ n | (CStorageSpec (CTypedef n)) <- Vector.toList declspecs ]
 
 -- * translation
 
@@ -201,29 +203,29 @@ analyseTypeDecl (CDecl declspecs declrs node)
             astError node "storage, function or alignment specifier for type declaration"
         | otherwise                          =
           do canonTySpecs <- canonicalTypeSpec typespecs
-             t <- tType True node (map CAttrQual (Vector.toList (attrs <> attrs_decl)) ++ typequals)
-                   canonTySpecs (Vector.toList derived_declrs) []
+             t <- tType True node (fmap CAttrQual (attrs <> attrs_decl) <> typequals)
+                   canonTySpecs derived_declrs mempty
              case nameOfNode node of
                Just n -> withDefTable (\dt -> (t, insertType dt n t))
                Nothing -> return t
         where
-        (storagespec, attrs_decl, typequals, typespecs, funspecs, alignspecs) = partitionDeclSpecs (Vector.toList declspecs)
+        (storagespec, attrs_decl, typequals, typespecs, funspecs, alignspecs) = partitionDeclSpecs declspecs
     analyseTyDeclr _ = astError node "Non-abstract declarator in type declaration"
 
 
 -- | translate a type
-tType :: (MonadTrav m) => Bool -> NodeInfo -> [CTypeQual] -> TypeSpecAnalysis -> [CDerivedDeclr] -> [CDecl] -> m Type
+tType :: (MonadTrav m) => Bool -> NodeInfo -> Vector CTypeQual -> TypeSpecAnalysis -> Vector CDerivedDeclr -> Vector CDecl -> m Type
 tType handle_sue_def top_node typequals canonTySpecs derived_declrs oldstyle_params
-    = mergeOldStyle top_node oldstyle_params derived_declrs >>= buildType
+    = mergeOldStyle top_node oldstyle_params derived_declrs >>= buildType . Vector.toList
     where
     buildType [] =
         tDirectType handle_sue_def top_node typequals canonTySpecs
     buildType (CPtrDeclr ptrquals node : dds) =
-        buildType dds >>= buildPointerType (Vector.toList ptrquals) node
+        buildType dds >>= buildPointerType ptrquals node
     buildType (CArrDeclr arrquals size node : dds)
-        = buildType dds >>= buildArrayType (Vector.toList arrquals) size node
+        = buildType dds >>= buildArrayType arrquals size node
     buildType (CFunDeclr (Right (params, isVariadic)) attrs node : dds)
-        = buildType dds >>= (liftM  (uncurry FunctionType) . buildFunctionType (Vector.toList params) isVariadic attrs node)
+        = buildType dds >>= (liftM  (uncurry FunctionType) . buildFunctionType params isVariadic attrs node)
     buildType (CFunDeclr (Left _) _ _ : _)
         -- /FIXME/: this is really an internal error, not an AST error.
         = astError top_node "old-style parameters remaining after mergeOldStyle"
@@ -237,19 +239,19 @@ tType handle_sue_def top_node typequals canonTySpecs derived_declrs oldstyle_par
     -- When analyzing the  the function body, we push parameters in function body scope.
     buildFunctionType params is_variadic attrs _node return_ty
         = do enterPrototypeScope
-             params' <- mapM tParamDecl params
+             params' <- Vector.mapM tParamDecl params
              leavePrototypeScope
-             attrs'  <- mapM tAttr attrs
+             attrs'  <- Vector.mapM tAttr attrs
              return $ (\t -> (t,attrs')) $
-                case (map declType params',is_variadic) of
+                case (Vector.toList $ fmap declType params',is_variadic) of
                     ([],False) -> FunTypeIncomplete return_ty  -- may be improved later on
                     ([DirectType TyVoid _ _],False) -> FunType return_ty mempty False
-                    _ -> FunType return_ty (Vector.toList params') is_variadic
+                    _ -> FunType return_ty params' is_variadic
 
 -- | translate a type without (syntactic) indirections
 -- Due to the GNU @typeof@ extension and typeDefs, this can be an arbitrary type
 tDirectType :: (MonadTrav m) =>
-               Bool -> NodeInfo -> [CTypeQual] -> TypeSpecAnalysis -> m Type
+               Bool -> NodeInfo -> Vector CTypeQual -> TypeSpecAnalysis -> m Type
 tDirectType handle_sue_def node ty_quals canonTySpec = do
     (quals,attrs) <- tTypeQuals ty_quals
     let baseType ty_name = DirectType ty_name quals attrs
@@ -267,7 +269,7 @@ tDirectType handle_sue_def node ty_quals canonTySpec = do
         TSTypeDef tdr -> return$ TypeDefType tdr quals attrs
         TSNonBasic (CSUType su _tnode)       -> liftM (baseType . TyComp) $ tCompTypeDecl handle_sue_def su
         TSNonBasic (CEnumType enum _tnode)   -> liftM (baseType . TyEnum) $ tEnumTypeDecl handle_sue_def enum
-        TSType t                             ->  mergeTypeAttributes node quals (Vector.toList attrs) t
+        TSType t                             ->  mergeTypeAttributes node quals attrs t
         TSNonBasic t -> astError node ("Unexpected typespec: " ++ show t)
 
 -- | Merge type attributes
@@ -276,19 +278,19 @@ tDirectType handle_sue_def node ty_quals canonTySpec = do
 --
 -- > /* tyqual attr typeof(type) */
 -- > const typeof(char volatile) x;
-mergeTypeAttributes :: (MonadCError m) => NodeInfo -> TypeQuals -> [Attr] -> Type -> m Type
+mergeTypeAttributes :: (MonadCError m) => NodeInfo -> TypeQuals -> Vector Attr -> Type -> m Type
 mergeTypeAttributes node_info quals attrs typ =
     case typ of
-        DirectType ty_name quals' attrs' -> merge quals' (Vector.toList attrs') $ (Vector.toList DirectType) ty_name
-        PtrType ty quals' attrs'  -> merge quals' (Vector.toList attrs') $ PtrType ty
-        ArrayType ty array_sz quals' attrs' -> merge quals' (Vector.toList attrs') $ ArrayType ty array_sz
+        DirectType ty_name quals' attrs' -> merge quals' attrs' $ DirectType ty_name
+        PtrType ty quals' attrs'  -> merge quals' attrs' $ PtrType ty
+        ArrayType ty array_sz quals' attrs' -> merge quals' attrs' $ ArrayType ty array_sz
         FunctionType fty attrs'
              | quals /= noTypeQuals -> astError node_info "type qualifiers for function type"
-             | otherwise            -> return$ FunctionType fty (Vector.toList (attrs' <> attrs))
+             | otherwise            -> return$ FunctionType fty (attrs' <> attrs)
         TypeDefType tdr quals' attrs'
-            -> merge quals' (Vector.toList attrs') $ TypeDefType tdr
+            -> merge quals' attrs' $ TypeDefType tdr
     where
-    merge quals' attrs' tyf = return $ tyf (mergeTypeQuals quals quals') (attrs' ++ attrs)
+    merge quals' attrs' tyf = return $ tyf (mergeTypeQuals quals quals') (attrs' <> attrs)
 
 typeDefRef :: (MonadCError m, MonadSymtab m) => NodeInfo -> Ident -> m TypeDefRef
 typeDefRef t_node name = lookupTypeDef name >>= \ty -> return (TypeDefRef name ty t_node)
@@ -309,7 +311,7 @@ tCompTypeDecl handle_def (CStruct tag ident_opt member_decls_opt attrs node_info
     -- when handle_def is true, enter the definition
     when handle_def $
         maybeM member_decls_opt $ \decls ->
-                tCompType sue_ref tag' (Vector.toList decls) attrs' node_info
+                tCompType sue_ref tag' decls attrs' node_info
             >>= (handleTagDef.CompDef)
     return decl
 
@@ -317,10 +319,10 @@ tTag :: CStructTag -> CompTyKind
 tTag CStructTag = StructTag
 tTag CUnionTag  = UnionTag
 
-tCompType :: (MonadTrav m) => SUERef -> CompTyKind -> [CDecl] -> Attributes -> NodeInfo -> m CompType
+tCompType :: (MonadTrav m) => SUERef -> CompTyKind -> Vector CDecl -> Attributes -> NodeInfo -> m CompType
 tCompType tag sue_ref member_decls attrs node
     = return (CompType tag sue_ref) `ap`
-        (concatMapM tMemberDecls (Vector.toList member_decls)) `ap`
+        (liftM Vector.concat $ mapM tMemberDecls (Vector.toList member_decls)) `ap`
         (return attrs) `ap`
         (return node)
 
@@ -332,25 +334,25 @@ tCompType tag sue_ref member_decls attrs node
 tEnumTypeDecl :: (MonadTrav m) => Bool -> CEnum -> m EnumTypeRef
 tEnumTypeDecl handle_def (CEnum ident_opt enumerators_opt attrs node_info)
     | (Nothing, Nothing) <- (ident_opt, enumerators_opt) = astError node_info "both definition and name of enum missing"
-    | Just [] <- Vector.toList enumerators_opt                         = astError node_info "empty enumerator list"
+    | Just [] <- fmap Vector.toList enumerators_opt                         = astError node_info "empty enumerator list"
     | otherwise
         = do sue_ref <- createSUERef node_info ident_opt
              attrs' <- mapM tAttr attrs
              let decl = EnumTypeRef sue_ref node_info
              when handle_def $
                  maybeM enumerators_opt $ \enumerators ->
-                         tEnumType sue_ref (Vector.toList enumerators) attrs' node_info
+                         tEnumType sue_ref enumerators attrs' node_info
                     >>=  (handleTagDef . EnumDef)
              return decl
 
 -- | translate and analyse an enumeration type
 tEnumType :: (MonadCError m, MonadSymtab m) =>
-             SUERef -> [(Ident, Maybe CExpr)] -> Attributes -> NodeInfo -> m EnumType
+             SUERef -> Vector (Ident, Maybe CExpr) -> Attributes -> NodeInfo -> m EnumType
 tEnumType sue_ref enumerators attrs node = do
     mapM_ handleEnumeratorDef enumerators'
     return ty
     where
-    ty = EnumType sue_ref enumerators' attrs node
+    ty = EnumType sue_ref (Vector.fromList enumerators') attrs node
     (_,enumerators') = mapAccumL nextEnumerator (Left 0) (Vector.toList enumerators)
     nextEnumerator memo (ident,e) =
       let (memo',expr) = nextEnrExpr memo e in
@@ -406,13 +408,13 @@ tArraySize (CNoArrSize False) = return (UnknownArraySize False)
 tArraySize (CNoArrSize True) = return (UnknownArraySize True)
 tArraySize (CArrSize static szexpr) = liftM (ArraySize static) (return szexpr)
 
-tTypeQuals :: (MonadTrav m) => [CTypeQual] -> m (TypeQuals,Attributes)
+tTypeQuals :: (MonadTrav m) => Vector CTypeQual -> m (TypeQuals,Attributes)
 tTypeQuals = foldrM go (noTypeQuals,mempty) where
     go (CConstQual _) (tq,attrs) = return (tq { constant = True },attrs)
     go (CVolatQual _) (tq,attrs) = return (tq { volatile = True },attrs)
     go (CRestrQual _) (tq,attrs) = return (tq { restrict = True },attrs)
     go (CAtomicQual _) (tq,attrs) = return (tq { atomic = True },attrs)
-    go (CAttrQual attr) (tq,attrs) = liftM (\attr' -> (tq,attr':attrs)) (tAttr attr)
+    go (CAttrQual attr) (tq,attrs) = liftM (\attr' -> (tq,attr' `Vector.cons` attrs)) (tAttr attr)
     go (CNullableQual _) (tq,attrs) = return (tq { nullable = True }, attrs)
     go (CNonnullQual _) (tq,attrs) = return (tq { nonnull = True }, attrs)
 
@@ -467,7 +469,7 @@ canonicalTypeSpec = foldrM go TSNone where
                             = return$  TSNum$ nts { isComplex = True }
     go (CTypeDef i ni) TSNone = liftM TSTypeDef $ typeDefRef ni i
     go (CTypeOfType d _ni) TSNone = liftM TSType $ analyseTypeDecl d
-    go (CTypeOfExpr e _) TSNone = liftM TSType $ tExpr [] RValue e
+    go (CTypeOfExpr e _) TSNone = liftM TSType $ tExpr mempty RValue e
     -- todo: atomic qualifier discarded
     go (CAtomicType d _ni) TSNone = liftM TSType $ analyseTypeDecl d
     go otherType  TSNone    = return$  TSNonBasic otherType
@@ -504,19 +506,19 @@ canonicalStorageSpec storagespecs = liftM elideAuto $ foldrM updStorage NoStorag
 -- > int f(int d, int c, char a, char* b)
 --
 -- TODO: This could be moved to syntax, as it operates on the AST only
-mergeOldStyle :: (MonadCError m) => NodeInfo -> [CDecl] -> [CDerivedDeclr] -> m [CDerivedDeclr]
-mergeOldStyle _node [] declrs = return declrs
-mergeOldStyle node oldstyle_params (CFunDeclr params attrs fdnode : dds) =
+mergeOldStyle :: (MonadCError m) => NodeInfo -> Vector CDecl -> Vector CDerivedDeclr -> m (Vector CDerivedDeclr)
+mergeOldStyle _node (Vector.null -> True) declrs = return declrs
+mergeOldStyle node oldstyle_params (Vector.toList -> (CFunDeclr params attrs fdnode : dds)) =
     case params of
         Left list -> do
             -- FIXME: This translation doesn't work in the following example
             -- [| int f(b,a) struct x { }; int b,a; { struct x local; return local.x } |]
-            oldstyle_params' <- liftM concat $ mapM splitCDecl oldstyle_params
-            param_map <- liftM Map.fromList $ mapM attachNameOfDecl oldstyle_params'
+            oldstyle_params' <- liftM Vector.concat $ mapM splitCDecl (Vector.toList oldstyle_params)
+            param_map <- liftM (Map.fromList . Vector.toList) $ Vector.mapM attachNameOfDecl oldstyle_params'
             (newstyle_params,param_map') <- foldrM insertParamDecl (mempty,param_map) list
             unless (Map.null param_map') $
               astError node $ "declarations for parameter(s) "++ showParamMap param_map' ++" but no such parameter"
-            return (CFunDeclr (Right (newstyle_params, False)) attrs fdnode : dds)
+            return $ Vector.fromList (CFunDeclr (Right (Vector.fromList newstyle_params, False)) attrs fdnode : dds)
         Right _newstyle -> astError node "oldstyle parameter list, but newstyle function declaration"
     where
         attachNameOfDecl decl = nameOfDecl decl >>= \n -> return (n,decl)
@@ -526,7 +528,9 @@ mergeOldStyle node oldstyle_params (CFunDeclr params attrs fdnode : dds) =
                 Nothing -> return (implicitIntParam param_name : ps, param_map)
         implicitIntParam param_name =
             let nInfo = nodeInfo param_name in
-            CDecl [CTypeSpec (CIntType nInfo)] [(Just (CDeclr (Just param_name) [] Nothing [] nInfo),Nothing,Nothing)] nInfo
+            CDecl (Vector.fromList [CTypeSpec (CIntType nInfo)])
+              (Vector.fromList [(Just (CDeclr (Just param_name) mempty Nothing mempty nInfo),Nothing,Nothing)])
+              nInfo
         showParamMap = intercalate ", " . map identToString . Map.keys
 mergeOldStyle node _ _ = astError node "oldstyle parameter list, but not function type"
 
@@ -539,24 +543,24 @@ mergeOldStyle node _ _ = astError node "oldstyle parameter list, but not functio
 -- > [ [d| struct x { int z; } a, struct x *b; |] ]
 --
 -- /TODO/: This could be moved to syntax, as it operates on the AST only
-splitCDecl :: (MonadCError m) => CDecl -> m [CDecl]
-splitCDecl decl@(CStaticAssert _ _ _) = return [decl]
+splitCDecl :: (MonadCError m) => CDecl -> m (Vector CDecl)
+splitCDecl decl@(CStaticAssert _ _ _) = return (Vector.fromList [decl])
 splitCDecl decl@(CDecl declspecs declrs node) =
     case declrs of
-        []      -> internalErr "splitCDecl applied to empty declaration"
+        (Vector.null -> True)      -> internalErr "splitCDecl applied to empty declaration"
         -- single declarator, not need to split
-        [_declr] -> return [decl]
+        (Vector.toList -> [_declr]) -> return (Vector.fromList [decl])
         -- more than one declarator
-        (d1:ds) ->
-            let declspecs' = map elideSUEDef declspecs in
-            return$ (CDecl declspecs [d1] node) : [ CDecl declspecs' [declr] node | declr <- ds ]
+        (Vector.toList -> (d1:ds)) ->
+            let declspecs' = fmap elideSUEDef declspecs in
+            return$ Vector.fromList $ (CDecl declspecs (Vector.fromList [d1]) node) : [ CDecl declspecs' (Vector.fromList [declr]) node | declr <- ds ]
     where
     elideSUEDef declspec@(CTypeSpec tyspec) =
         case tyspec of
             (CEnumType (CEnum name _def _attrs enum_node) node_info) ->
-                CTypeSpec (CEnumType (CEnum name Nothing [] enum_node) node_info)
+                CTypeSpec (CEnumType (CEnum name Nothing mempty enum_node) node_info)
             (CSUType (CStruct tag name _def _attrs su_node) node_info) ->
-                CTypeSpec (CSUType (CStruct tag name Nothing [] su_node) node_info)
+                CTypeSpec (CSUType (CStruct tag name Nothing mempty su_node) node_info)
             _ -> declspec
     elideSUEDef declspec = declspec
 
@@ -581,8 +585,8 @@ nameOfDecl d = getOnlyDeclr d >>= \declr ->
         (CDeclr (Just name) _ _ _ _node) -> return name
         (CDeclr Nothing _ _ _ _node)     -> internalErr "nameOfDecl: abstract declarator"
 emptyDeclr :: NodeInfo -> CDeclr
-emptyDeclr node = CDeclr Nothing [] Nothing [] node
+emptyDeclr node = CDeclr Nothing mempty Nothing mempty node
 getOnlyDeclr :: (MonadCError m) => CDecl -> m CDeclr
-getOnlyDeclr (CDecl _ [(Just declr,_,_)] _) = return declr
+getOnlyDeclr (CDecl _ (Vector.toList -> [(Just declr,_,_)]) _) = return declr
 getOnlyDeclr (CDecl _ _ _node) = internalErr "getOnlyDeclr: declaration doesn't have a unique declarator"
 getOnlyDeclr (CStaticAssert _ _ _) = internalErr "getOnlyDeclr: static assertion doesn't have a unique declarator"

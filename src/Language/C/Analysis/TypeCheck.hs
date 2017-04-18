@@ -18,6 +18,8 @@ import Language.C.Analysis.TypeConversions
 import Language.C.Analysis.TypeUtils
 import Language.C.Analysis.Debug ()
 import Text.PrettyPrint.HughesPJ hiding ((<>))
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 
 -- We used to re-implement and export the standard Either instance for
 -- Monad, which is bad, because as of GHC 7 it is in Control.Monad.Instances
@@ -372,7 +374,7 @@ fieldType ni m t =
     DirectType (TyComp ctr) _ _ ->
       do td <- lookupSUE ni (sueRef ctr)
          ms <- tagMembers ni td
-         case lookup m ms of
+         case lookup m (Vector.toList ms) of
            Just ft -> return ft
            Nothing -> typeError ni $ "field not found: " <> identToString m
     _t' -> astError ni $
@@ -382,25 +384,25 @@ fieldType ni m t =
 -- | Get all members of a struct, union, or enum, with their
 --   types. Collapse fields of anonymous members.
 tagMembers :: (MonadCError m, MonadSymtab m) =>
-              NodeInfo -> TagDef -> m [(Ident, Type)]
+              NodeInfo -> TagDef -> m (Vector (Ident, Type))
 tagMembers ni td =
   case td of
-    CompDef (CompType _ _ ms _ _) -> getMembers ms
-    EnumDef (EnumType _ es _ _) -> getMembers es
+    CompDef (CompType _ _ ms _ _) -> getMembers (Vector.toList ms)
+    EnumDef (EnumType _ es _ _) -> getMembers (Vector.toList es)
   where getMembers ds =
           do let ts = fmap declType ds
                  ns = fmap declName ds
-             Vector.fromList . concat `liftM` mapM (expandAnonymous ni) (zip ns ts)
+             Vector.concat `liftM` mapM (expandAnonymous ni) (zip ns ts)
 
 -- | Expand an anonymous composite type into a list of member names
 --   and their associated types.
 expandAnonymous :: (MonadCError m, MonadSymtab m) =>
                    NodeInfo -> (VarName, Type)
-                -> m [(Ident, Type)]
+                -> m (Vector (Ident, Type))
 expandAnonymous ni (NoName, DirectType (TyComp ctr) _ _) =
   lookupSUE ni (sueRef ctr) >>= tagMembers ni
-expandAnonymous _ (NoName, _) = return []
-expandAnonymous _ (VarName n _, t) = return [(n, t)]
+expandAnonymous _ (NoName, _) = return mempty
+expandAnonymous _ (VarName n _, t) = return $ Vector.fromList [(n, t)]
 
 lookupSUE :: (MonadCError m, MonadSymtab m) =>
              NodeInfo -> SUERef -> m TagDef
@@ -442,6 +444,6 @@ sueAttrs ni sue =
   do dt <- getDefTable
      case lookupTag sue dt of
        Nothing -> astError ni $ "SUE not found: " <> render (pretty sue)
-       Just (Left _) -> return []
+       Just (Left _) -> return mempty
        Just (Right (CompDef (CompType _ _ _ attrs _))) -> return attrs
        Just (Right (EnumDef (EnumType _ _ attrs _))) -> return attrs

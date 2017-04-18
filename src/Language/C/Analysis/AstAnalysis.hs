@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, PatternGuards #-}
+{-# LANGUAGE ScopedTypeVariables, PatternGuards, ViewPatterns #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Language.C.Parser.Translation
@@ -42,7 +42,7 @@ import Language.C.Syntax.AST
 import Language.C.Syntax.Constants
 import Language.C.Syntax.Ops
 import Language.C.Syntax.Utils
-import Text.PrettyPrint.HughesPJ
+import Text.PrettyPrint.HughesPJ hiding ((<>))
 
 
 import Prelude hiding (mapM, mapM_, reverse)
@@ -51,6 +51,9 @@ import qualified Data.Map as Map
 import Data.Maybe
 import Data.Traversable (mapM)
 import Data.Foldable (mapM_)
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import Data.Monoid ((<>))
 
 -- * analysis
 
@@ -104,7 +107,7 @@ analyseFunDef (CFunDef declspecs declr oldstyle_decls stmt node_info) = do
     handleFunDef ident (FunDef var_decl stmt' node_info)
     where
     improveFunDefType (FunctionType (FunTypeIncomplete return_ty) attrs) =
-      return $ FunctionType (FunType return_ty [] False) attrs
+      return $ FunctionType (FunType return_ty mempty False) attrs
     improveFunDefType ty = return ty
 
 voidM :: Monad m => m a -> m ()
@@ -128,7 +131,7 @@ analyseDecl is_local decl@(CDecl declspecs declrs node)
                              (storage_specs, attrs, typequals, canonTySpecs, funspecs)
                        mapM_ (uncurry (analyseVarDeclr specs)) declr_list
     where
-    declr_list = zip (True : repeat False) declrs
+    declr_list = zip (True : repeat False) (Vector.toList declrs)
     typedef_spec = hasTypeDef declspecs
 
     analyseTyDef declspecs' handle_sue_def declr =
@@ -141,7 +144,7 @@ analyseDecl is_local decl@(CDecl declspecs declrs node)
         let (storage_specs, attrs, typequals, canonTySpecs, inline) = specs
         vardeclInfo@(VarDeclInfo _ _ _ _ typ _) <-
           analyseVarDecl handle_sue_def storage_specs attrs typequals canonTySpecs inline
-                         declr [] Nothing
+                         declr mempty Nothing
         -- declare / define the object
         if isFunctionType typ
             then extFunProto vardeclInfo
@@ -155,10 +158,10 @@ analyseDecl is_local decl@(CDecl declspecs declrs node)
     analyseVarDeclr _ _ (_,_,Just _bitfieldSz) = astError node "bitfield size in object declaration"
 
 -- | Analyse a typedef
-analyseTypeDef :: (MonadTrav m) => Bool -> [CDeclSpec] -> CDeclr -> NodeInfo -> m ()
+analyseTypeDef :: (MonadTrav m) => Bool -> Vector CDeclSpec -> CDeclr -> NodeInfo -> m ()
 analyseTypeDef handle_sue_def declspecs declr node_info = do
     -- analyse the declarator
-    (VarDeclInfo name fun_attrs storage_spec attrs ty _node) <- analyseVarDecl' handle_sue_def declspecs declr [] Nothing
+    (VarDeclInfo name fun_attrs storage_spec attrs ty _node) <- analyseVarDecl' handle_sue_def declspecs declr mempty Nothing
     checkValidTypeDef fun_attrs storage_spec attrs
     when (isNoName name) $ astError node_info "NoName in analyseTypeDef"
     let ident = identOfVarName name
@@ -167,7 +170,7 @@ analyseTypeDef handle_sue_def declspecs declr node_info = do
     checkValidTypeDef fun_attrs  _ _ | fun_attrs /= noFunctionAttrs =
                                          astError node_info "inline specifier for typeDef"
     checkValidTypeDef _ NoStorageSpec _ = return ()
-    checkValidTypeDef _ bad_storage _ = astError node_info $ "storage specified for typeDef: " ++ show bad_storage
+    checkValidTypeDef _ bad_storage _ = astError node_info $ "storage specified for typeDef: " <> show bad_storage
 
 -- | compute storage of a function definition
 --
@@ -185,10 +188,10 @@ computeFunDefStorage ident other_spec  = do
     NoStorageSpec  -> return$ maybe defaultSpec declStorage obj_opt
     (ExternSpec False) -> return$ maybe defaultSpec declStorage obj_opt
     bad_spec -> throwTravError $ badSpecifierError (nodeInfo ident)
-                  $ "unexpected function storage specifier (only static or extern is allowed)" ++ show bad_spec
+                  $ "unexpected function storage specifier (only static or extern is allowed)" <> show bad_spec
 
 -- (private) Get parameters of a function type
-getParams :: Type -> Maybe [ParamDecl]
+getParams :: Type -> Maybe (Vector ParamDecl)
 getParams (FunctionType (FunType _ params _) _) = Just params
 getParams _ = Nothing
 
@@ -212,7 +215,7 @@ extFunProto (VarDeclInfo var_name fun_spec storage_spec attrs ty node_info) =
             ExternSpec False -> case old_fun of
                                     Nothing -> FunLinkage ExternalLinkage
                                     Just f  -> declStorage f
-            _ -> error $ "funDeclLinkage: " ++ show storage_spec
+            _ -> error $ "funDeclLinkage: " <> show storage_spec
     checkValidSpecs
         | hasThreadLocalSpec storage_spec = astError node_info "thread local storage specified for function"
         | RegSpec <- storage_spec         = astError node_info "invalid `register' storage specified for function"
@@ -297,7 +300,7 @@ defineParams ni decl =
 analyseFunctionBody :: (MonadTrav m) => NodeInfo -> VarDecl -> CStat -> m Stmt
 analyseFunctionBody node_info decl s@(CCompound localLabels items _) =
   do enterFunctionScope
-     mapM_ (withDefTable . defineLabel) (localLabels ++ getLabels s)
+     mapM_ (withDefTable . defineLabel) (localLabels <> getLabels s)
      defineParams node_info decl
      -- record parameters
      mapM_ (tBlockItem [FunCtx decl]) items
@@ -356,7 +359,7 @@ tStmt _ (CGoto l ni)             =
   do dt <- getDefTable
      case lookupLabel l dt of
        Just _ -> return voidType
-       Nothing -> typeError ni $ "undefined label in goto: " ++ identToString l
+       Nothing -> typeError ni $ "undefined label in goto: " <> identToString l
 tStmt c (CCont ni)               =
   do unless (inLoop c) $ astError ni "continue statement outside of loop"
      return voidType
@@ -369,7 +372,7 @@ tStmt c (CReturn (Just e) ni)    =
      rt <- case enclosingFunctionType c of
              Just (FunctionType (FunType rt _ _) _) -> return rt
              Just (FunctionType (FunTypeIncomplete rt) _) -> return rt
-             Just ft -> astError ni $ "bad function type: " ++ pType ft
+             Just ft -> astError ni $ "bad function type: " <> pType ft
              Nothing -> astError ni "return statement outside function"
      case (rt, t) of
        -- apparently it's ok to return void from a void function?
@@ -542,7 +545,7 @@ tExpr' c _ (CMember e m deref ni)   =
      bt <- if deref then typeErrorOnLeft ni (derefType t) else return t
      fieldType ni m bt
 tExpr' c side (CComma es _)            =
-  mapM (tExpr c side) es >>= return . last
+  Vector.mapM (tExpr c side) es >>= return . Vector.last
 tExpr' c side (CCast d e ni)           =
   do dt <- analyseTypeDecl d
      et <- tExpr c side e
@@ -560,7 +563,7 @@ tExpr' c side (CComplexReal e ni)      = complexBaseType ni c side e
 tExpr' c side (CComplexImag e ni)      = complexBaseType ni c side e
 tExpr' _ side (CLabAddrExpr _ ni)      =
   do when (side == LValue) $ typeError ni "label address as lvalue"
-     return $ PtrType voidType noTypeQuals []
+     return $ PtrType voidType noTypeQuals mempty
 tExpr' _ side (CCompoundLit d initList ni) =
   do when (side == LValue) $ typeError ni "compound literal as lvalue"
      lt <- analyseTypeDecl d
@@ -574,7 +577,7 @@ tExpr' _ LValue (CSizeofType _ ni)     =
   typeError ni "sizeoftype as lvalue"
 tExpr' ctx side (CGenericSelection expr list ni) = do
   ty_sel <- tExpr ctx side expr
-  ty_list <- mapM analyseAssoc list
+  ty_list <- mapM analyseAssoc (Vector.toList list)
   def_expr_ty <-
     case dropWhile (isJust . fst) ty_list of
       [(Nothing,tExpr'')] -> return (Just tExpr'')
@@ -584,8 +587,8 @@ tExpr' ctx side (CGenericSelection expr list ni) = do
     ((_,expr_ty) : _ ) -> return expr_ty
     [] -> case def_expr_ty of
       (Just expr_ty) -> return expr_ty
-      Nothing -> astError ni ("no clause matches for generic selection (not fully supported) - selector type is " ++ show (pretty ty_sel) ++
-                              ", available types are " ++ show (map (pretty.fromJust.fst) (filter (isJust.fst) ty_list)))
+      Nothing -> astError ni ("no clause matches for generic selection (not fully supported) - selector type is " <> show (pretty ty_sel) <>
+                              ", available types are " <> show (map (pretty.fromJust.fst) (filter (isJust.fst) ty_list)))
   where
     analyseAssoc (mdecl,expr') = do
       tDecl <- mapM analyseTypeDecl mdecl
@@ -605,7 +608,7 @@ tExpr' _ _ (CConst c)                  = constType c
 tExpr' _ _ (CBuiltinExpr b)            = builtinType b
 tExpr' c side (CCall (CVar i _) args ni)
   | identToString i == "__builtin_choose_expr" =
-    case args of
+    case Vector.toList args of
       [g, e1, e2] ->
         -- XXX: the MachineDesc parameter below should be configurable
         do b <- constEval defaultMD Map.empty g
@@ -621,7 +624,7 @@ tExpr' c _ (CCall fe args ni)          =
                     (DirectType (TyIntegral TyInt) noTypeQuals noAttributes))
                    noAttributes
          fallback i = do warn $ invalidAST ni $
-                                "unknown function: " ++ identToString i
+                                "unknown function: " <> identToString i
                          return defType
      t <- case fe of
             CVar i _ -> lookupObject i >>=
@@ -631,15 +634,15 @@ tExpr' c _ (CCall fe args ni)          =
      -- XXX: we don't actually want to return the canonical return type here
      case canonicalType t of
        PtrType (FunctionType (FunType rt pdecls varargs) _) _ _ ->
-         do let ptys = map declType pdecls
-            mapM_ checkArg $ zip3 ptys atys args
+         do let ptys = fmap declType pdecls
+            mapM_ checkArg $ zip3 (Vector.toList ptys) (Vector.toList atys) (Vector.toList args)
             unless varargs $ when (length atys /= length ptys) $
                    typeError ni "incorrect number of arguments"
             return $ canonicalType rt
        PtrType (FunctionType (FunTypeIncomplete rt) _) _ _ ->
          do -- warn $ invalidAST ni "incomplete function type"
             return $ canonicalType rt
-       _  -> typeError ni $ "attempt to call non-function of type " ++ pType t
+       _  -> typeError ni $ "attempt to call non-function of type " <> pType t
   where checkArg (pty, aty, arg) =
           do attrs <- deepTypeAttrs pty
              if isTransparentUnion attrs
@@ -651,7 +654,7 @@ tExpr' c _ (CCall fe args ni)          =
                         {-
                         when (null $ rights $ matches ms) $
                              astError (nodeInfo arg) $
-                             "argument matches none of the elements " ++
+                             "argument matches none of the elements " <>
                              "of transparent union"
                         -}
                         return ()
@@ -672,7 +675,7 @@ tExpr' c _ (CAssign op le re ni)       =
      rt <- tExpr c RValue re
      when (constant $ typeQuals lt) $
           typeError ni $ "assignment to lvalue with `constant' qualifier: "
-                         ++ (render . pretty) le
+                         <> (render . pretty) le
      case (canonicalType lt, re) of
        (lt', CConst (CIntConst i _))
          | isPointerType lt' && getCInteger i == 0 -> return ()
@@ -687,7 +690,7 @@ tExpr' c _ (CStatExpr s _)             =
 
 tInitList :: MonadTrav m => NodeInfo -> Type -> CInitList -> m ()
 tInitList _ (ArrayType (DirectType (TyIntegral TyChar) _ _) _ _ _)
-              [([], CInitExpr e@(CConst (CStrConst _ _)) _)] =
+              (Vector.toList -> [(Vector.null -> True, CInitExpr e@(CConst (CStrConst _ _)) _)]) =
   tExpr [] RValue e >> return ()
 tInitList ni t@(ArrayType _ _ _ _) initList =
   do let default_ds =
@@ -696,24 +699,24 @@ tInitList ni t@(ArrayType _ _ _ _) initList =
 tInitList ni t@(DirectType (TyComp ctr) _ _) initList =
   do td <- lookupSUE ni (sueRef ctr)
      ms <- tagMembers ni td
-     let default_ds = map (\m -> CMemberDesig (fst m) ni) ms
-     checkInits t default_ds initList
+     let default_ds = fmap (\m -> CMemberDesig (fst m) ni) ms
+     checkInits t (Vector.toList default_ds) initList
 tInitList _ (PtrType (DirectType TyVoid _ _) _ _ ) _ =
           return () -- XXX: more checking
-tInitList _ t [([], i)] = voidM$ tInit t i
-tInitList ni t _ = typeError ni $ "initializer list for type: " ++ pType t
+tInitList _ t (Vector.toList -> [(Vector.null -> True, i)]) = voidM$ tInit t i
+tInitList ni t _ = typeError ni $ "initializer list for type: " <> pType t
 
 checkInits :: MonadTrav m => Type -> [CDesignator] -> CInitList -> m ()
-checkInits _ _ [] = return ()
-checkInits t dds ((ds, i) : is) =
+checkInits _ _ (Vector.null -> True) = return ()
+checkInits t dds (Vector.toList -> ((ds, i) : is)) =
   do (dds', ds') <- case (dds, ds) of
-                      ([], []) ->
+                      ([], Vector.null -> True) ->
                         typeError (nodeInfo i) "excess elements in initializer"
-                      (dd' : rest, []) -> return (rest, [dd'])
-                      (_, d : _) -> return (advanceDesigList dds d, ds)
+                      (dd' : rest, Vector.null -> True) -> return (rest, [dd'])
+                      (_, Vector.toList -> d : _) -> return (advanceDesigList dds d, Vector.toList ds)
      t' <- tDesignator t ds'
      _ <- tInit t' i
-     checkInits t dds' is
+     checkInits t dds' (Vector.fromList is)
 
 advanceDesigList :: [CDesignator] -> CDesignator -> [CDesignator]
 advanceDesigList ds d = drop 1 $ dropWhile (not . matchDesignator d) ds
@@ -756,7 +759,7 @@ complexBaseType ni c side e =
      case canonicalType t of
        DirectType (TyComplex ft) quals attrs ->
          return $ DirectType (TyFloating ft) quals attrs
-       _ -> typeError ni $ "expected complex type, got: " ++ pType t
+       _ -> typeError ni $ "expected complex type, got: " <> pType t
 
 
 -- | Return the type of a builtin.
@@ -766,10 +769,10 @@ builtinType (CBuiltinOffsetOf _ _ _)        = return size_tType
 builtinType (CBuiltinTypesCompatible _ _ _) = return boolType
 
 -- return @Just declspecs@ without @CTypedef@ if the declaration specifier contain @typedef@
-hasTypeDef :: [CDeclSpec] -> Maybe [CDeclSpec]
+hasTypeDef :: (Foldable f) => f CDeclSpec -> Maybe (Vector CDeclSpec)
 hasTypeDef declspecs =
     case foldr hasTypeDefSpec (False,[]) declspecs of
-        (True,specs') -> Just specs'
+        (True,specs') -> Just (Vector.fromList specs')
         (False,_)     -> Nothing
     where
     hasTypeDefSpec (CStorageSpec (CTypedef _)) (_,specs) = (True, specs)
